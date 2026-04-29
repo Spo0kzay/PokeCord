@@ -1,1 +1,13 @@
-
+{
+  "name": "pokecord",
+  "version": "1.0.0",
+  "description": "PokéCord - Poké-Discord bot",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0"
+  }
+}
