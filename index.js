@@ -26,17 +26,17 @@ const client = new Client({
 const spawnChannels = {};
 const shinyRole = {};
 const mythicRole = {};
+const eventConfig = {};
 
 let currentPokemon = null;
 let currentMessage = null;
 let wrongGuesses = 0;
 let despawnTimer = null;
 
-// streak system
 const streaks = {};
 
 // --------------------
-// RARITY SYSTEM
+// RARITY
 // --------------------
 function getRarity(id) {
     if (id <= 150) return { name: "Common 🟢", color: 0x2ecc71 };
@@ -46,16 +46,13 @@ function getRarity(id) {
     return { name: "Mythic 🔴", color: 0xe74c3c };
 }
 
-// weighted spawn
 function getWeightedPokemonId() {
-    const roll = Math.random();
-
-    if (roll < 0.7) return Math.floor(Math.random() * 500) + 1;
-    if (roll < 0.95) return Math.floor(Math.random() * 400) + 500;
+    const r = Math.random();
+    if (r < 0.7) return Math.floor(Math.random() * 500) + 1;
+    if (r < 0.95) return Math.floor(Math.random() * 400) + 500;
     return Math.floor(Math.random() * 125) + 900;
 }
 
-// shiny chance
 function isShiny() {
     return Math.random() < 0.01;
 }
@@ -68,9 +65,7 @@ const commands = [
         .setName('setup')
         .setDescription('Set spawn channel')
         .addChannelOption(o =>
-            o.setName('channel')
-                .setDescription('Spawn channel')
-                .setRequired(true)
+            o.setName('channel').setRequired(true)
         ),
 
     new SlashCommandBuilder()
@@ -78,13 +73,21 @@ const commands = [
         .setDescription('Set special roles')
         .addRoleOption(o =>
             o.setName('shinyhunter')
-                .setDescription('Shiny hunter role')
-                .setRequired(false)
         )
         .addRoleOption(o =>
             o.setName('mythichunter')
-                .setDescription('Mythic hunter role')
-                .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('eventinfo')
+        .setDescription('View event timing info')
+        .addStringOption(o =>
+            o.setName('type')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'legendary', value: 'legendary' },
+                    { name: 'mythic', value: 'mythic' }
+                )
         )
 ].map(c => c.toJSON());
 
@@ -106,11 +109,10 @@ client.on('interactionCreate', async (i) => {
     // setup channel
     if (i.commandName === 'setup') {
         spawnChannels[i.guildId] = i.options.getChannel('channel').id;
-
         return i.reply({ content: "✅ Spawn channel set", ephemeral: true });
     }
 
-    // setup roles
+    // roles
     if (i.commandName === 'setuprole') {
         const shiny = i.options.getRole('shinyhunter');
         const mythic = i.options.getRole('mythichunter');
@@ -118,34 +120,36 @@ client.on('interactionCreate', async (i) => {
         if (shiny) shinyRole[i.guildId] = shiny.id;
         if (mythic) mythicRole[i.guildId] = mythic.id;
 
-        return i.reply({
-            content: "✅ Roles updated",
-            ephemeral: true
-        });
+        return i.reply({ content: "✅ Roles set", ephemeral: true });
+    }
+
+    // event info
+    if (i.commandName === 'eventinfo') {
+        const type = i.options.getString('type');
+
+        const data = {
+            legendary: {
+                cooldown: "12 hours",
+                description: "🔥 Legendary events spawn powerful Pokémon with boosted rarity rates."
+            },
+            mythic: {
+                cooldown: "48 hours",
+                description: "👑 Mythic events are extremely rare server-wide special spawns."
+            }
+        };
+
+        const e = data[type];
+
+        const embed = new EmbedBuilder()
+            .setTitle(`📅 ${type.toUpperCase()} EVENT INFO`)
+            .setDescription(
+                `⏰ Cooldown: **${e.cooldown}**\n\n${e.description}`
+            )
+            .setColor(type === "mythic" ? 0xe74c3c : 0xe67e22);
+
+        return i.reply({ embeds: [embed], ephemeral: true });
     }
 });
-
-// --------------------
-// STREAK LOGIC
-// --------------------
-function getStreakBonus(userId) {
-    const s = streaks[userId] || 0;
-
-    if (s >= 100) return "mythic";
-    if (s >= 25) return "legendary";
-    if (s >= 10) return "epic";
-    if (s >= 5) return "rare";
-
-    return null;
-}
-
-// force rarity override
-function forceRarity(type) {
-    if (type === "rare") return { name: "Rare 🟡", color: 0xf1c40f };
-    if (type === "epic") return { name: "Epic 🟣", color: 0x9b59b6 };
-    if (type === "legendary") return { name: "Legendary 🟠", color: 0xe67e22 };
-    if (type === "mythic") return { name: "Mythic 🔴", color: 0xe74c3c };
-}
 
 // --------------------
 // SPAWN
@@ -159,7 +163,7 @@ async function spawnPokemon(channel) {
 
     const name = data.name.toLowerCase();
     const shiny = isShiny();
-    let rarity = getRarity(id);
+    const rarity = getRarity(id);
 
     const image =
         data.sprites.other["official-artwork"].front_default ||
@@ -170,13 +174,16 @@ async function spawnPokemon(channel) {
 
     const embed = new EmbedBuilder()
         .setTitle("🌿 A wild Pokémon appeared!")
-        .setDescription("Type `!catch <name>` to catch it!")
+        .setDescription(
+            "Type `!catch <name>` to catch it!\n\n" +
+            `🧪 Debug: **${name.toUpperCase()}${shiny ? " ✨ SHINY" : ""}**\n` +
+            `📊 Rarity: **${rarity.name}**`
+        )
         .setImage(image)
         .setColor(rarity.color);
 
     currentMessage = await channel.send({ embeds: [embed] });
 
-    // 10 min runaway
     despawnTimer = setTimeout(() => {
         if (!currentPokemon) return;
 
@@ -189,12 +196,11 @@ async function spawnPokemon(channel) {
         });
 
         currentPokemon = null;
-        wrongGuesses = 0;
     }, 10 * 60 * 1000);
 }
 
 // --------------------
-// CATCH SYSTEM
+// CATCH
 // --------------------
 client.on("messageCreate", async (m) => {
     if (m.author.bot) return;
@@ -203,70 +209,32 @@ client.on("messageCreate", async (m) => {
     if (!currentPokemon) return;
 
     const guess = m.content.split(" ")[1]?.toLowerCase();
-
     if (!guess) return;
-
-    const userId = m.author.id;
-
-    streaks[userId] = streaks[userId] || 0;
-
-    const bonus = getStreakBonus(userId);
-
-    let rarity = currentPokemon.rarity;
-
-    if (bonus) rarity = forceRarity(bonus);
 
     if (guess === currentPokemon.name) {
         clearTimeout(despawnTimer);
-
-        streaks[userId]++;
 
         const embed = new EmbedBuilder()
             .setTitle(`🎉 ${currentPokemon.name.toUpperCase()} has been caught!`)
             .setDescription(
                 `🏆 | Caught by: ${m.author}\n` +
-                `📊 Rarity: ${rarity.name}\n` +
-                (currentPokemon.shiny ? `✨ Shiny!!\n` : "") +
-                `🔥 Streak: ${streaks[userId]}`
+                `📊 Rarity: ${currentPokemon.rarity.name}\n` +
+                (currentPokemon.shiny ? "✨ Shiny!!\n" : "")
             )
-            .setColor(rarity.color);
+            .setColor(currentPokemon.rarity.color);
 
         await m.channel.send({ embeds: [embed] });
 
         currentPokemon = null;
-        wrongGuesses = 0;
-
     } else {
         wrongGuesses++;
-
-        streaks[userId] = 0; // reset streak on fail
-
-        await currentMessage.edit({
-            embeds: [
-                new EmbedBuilder()
-                    .setTitle("🌿 A wild Pokémon appeared!")
-                    .setDescription(
-                        "Type `!catch <name>` to catch it!\n\n" +
-                        `❌ Wrong attempts: ${wrongGuesses}/10`
-                    )
-                    .setImage(currentMessage.embeds[0]?.image?.url)
-                    .setColor(currentPokemon.rarity.color)
-            ]
-        });
 
         if (wrongGuesses >= 10) {
             clearTimeout(despawnTimer);
 
-            currentMessage.edit({
-                embeds: [
-                    new EmbedBuilder()
-                        .setTitle(`💨 ${currentPokemon.name.toUpperCase()} ran away!`)
-                        .setColor(0x95a5a6)
-                ]
-            });
+            m.channel.send(`💨 ${currentPokemon.name.toUpperCase()} ran away!`);
 
             currentPokemon = null;
-            wrongGuesses = 0;
         }
     }
 });
