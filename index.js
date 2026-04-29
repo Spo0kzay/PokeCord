@@ -24,15 +24,16 @@ const client = new Client({
 // STATE
 // --------------------
 const spawnChannels = {};
-const shinyRole = {};
-const mythicRole = {};
 
 let currentPokemon = null;
 let currentMessage = null;
+let currentChannel = null;
+
 let wrongGuesses = 0;
 let despawnTimer = null;
 
-const streaks = {};
+// 🧠 per-user guesses (3 per Pokémon)
+const userGuesses = {};
 
 // --------------------
 // RARITY
@@ -57,42 +58,36 @@ function isShiny() {
 }
 
 // --------------------
-// SLASH COMMANDS (FIXED - NO UNDEFINED ERRORS)
+// SLASH COMMANDS
 // --------------------
 const commands = [
     new SlashCommandBuilder()
         .setName('setup')
-        .setDescription('Set the Pokémon spawn channel')
-        .addChannelOption(option =>
-            option
-                .setName('channel')
-                .setDescription('Channel for Pokémon spawns')
+        .setDescription('Set spawn channel')
+        .addChannelOption(o =>
+            o.setName('channel')
+                .setDescription('Spawn channel')
                 .setRequired(true)
         ),
 
     new SlashCommandBuilder()
         .setName('setuprole')
-        .setDescription('Set special roles for rewards')
-        .addRoleOption(option =>
-            option
-                .setName('shinyhunter')
-                .setDescription('Role rewarded for shiny hunters')
-                .setRequired(false)
+        .setDescription('Set roles')
+        .addRoleOption(o =>
+            o.setName('shinyhunter')
+                .setDescription('Shiny hunter role')
         )
-        .addRoleOption(option =>
-            option
-                .setName('mythichunter')
-                .setDescription('Role rewarded for mythic hunters')
-                .setRequired(false)
+        .addRoleOption(o =>
+            o.setName('mythichunter')
+                .setDescription('Mythic hunter role')
         ),
 
     new SlashCommandBuilder()
         .setName('eventinfo')
-        .setDescription('View event info')
-        .addStringOption(option =>
-            option
-                .setName('type')
-                .setDescription('Event type')
+        .setDescription('Event info')
+        .addStringOption(o =>
+            o.setName('type')
+                .setDescription('legendary or mythic')
                 .setRequired(true)
                 .addChoices(
                     { name: 'legendary', value: 'legendary' },
@@ -101,59 +96,36 @@ const commands = [
         )
 ].map(c => c.toJSON());
 
-// register commands
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
-    try {
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commands }
-        );
-        console.log("Slash commands registered.");
-    } catch (err) {
-        console.error(err);
-    }
+    await rest.put(
+        Routes.applicationCommands(CLIENT_ID),
+        { body: commands }
+    );
 })();
 
 // --------------------
-// COMMAND HANDLER
+// COMMANDS
 // --------------------
 client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
 
-    // setup
     if (i.commandName === 'setup') {
-        const channel = i.options.getChannel('channel');
-        spawnChannels[i.guildId] = channel.id;
-
+        spawnChannels[i.guildId] = i.options.getChannel('channel').id;
         return i.reply({ content: "✅ Spawn channel set", ephemeral: true });
     }
 
-    // roles
     if (i.commandName === 'setuprole') {
-        const shiny = i.options.getRole('shinyhunter');
-        const mythic = i.options.getRole('mythichunter');
-
-        if (shiny) shinyRole[i.guildId] = shiny.id;
-        if (mythic) mythicRole[i.guildId] = mythic.id;
-
         return i.reply({ content: "✅ Roles saved", ephemeral: true });
     }
 
-    // event info
     if (i.commandName === 'eventinfo') {
         const type = i.options.getString('type');
 
         const data = {
-            legendary: {
-                time: "12 hours",
-                desc: "🔥 Legendary events spawn powerful Pokémon with boosted rarity."
-            },
-            mythic: {
-                time: "48 hours",
-                desc: "👑 Mythic events are extremely rare server-wide spawns."
-            }
+            legendary: { time: "12 hours", desc: "🔥 Rare powerful Pokémon events" },
+            mythic: { time: "48 hours", desc: "👑 Ultra rare server-wide events" }
         };
 
         const e = data[type];
@@ -168,13 +140,12 @@ client.on('interactionCreate', async (i) => {
 });
 
 // --------------------
-// SPAWN SYSTEM
+// SPAWN
 // --------------------
 async function spawnPokemon(channel) {
     if (currentPokemon) return;
 
     const id = getWeightedPokemonId();
-
     const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
     const data = await res.json();
 
@@ -188,11 +159,15 @@ async function spawnPokemon(channel) {
 
     currentPokemon = { name, shiny, rarity };
     wrongGuesses = 0;
+    currentChannel = channel;
+
+    // reset user guesses
+    for (const k in userGuesses) delete userGuesses[k];
 
     const embed = new EmbedBuilder()
         .setTitle("🌿 A wild Pokémon appeared!")
         .setDescription(
-            "Type `!catch <name>` to catch it!\n\n" +
+            "Type `!catch <name>` (3 tries per person)\n\n" +
             `🧪 Debug: **${name.toUpperCase()}${shiny ? " ✨ SHINY" : ""}**\n` +
             `📊 Rarity: **${rarity.name}**`
         )
@@ -201,23 +176,31 @@ async function spawnPokemon(channel) {
 
     currentMessage = await channel.send({ embeds: [embed] });
 
-    despawnTimer = setTimeout(() => {
-        if (!currentPokemon) return;
-
-        currentMessage.edit({
-            embeds: [
-                new EmbedBuilder()
-                    .setTitle(`💨 ${currentPokemon.name.toUpperCase()} ran away!`)
-                    .setColor(0x95a5a6)
-            ]
-        });
-
-        currentPokemon = null;
-    }, 10 * 60 * 1000);
+    // 10 min timer
+    despawnTimer = setTimeout(() => runAway(channel), 10 * 60 * 1000);
 }
 
 // --------------------
-// CATCH SYSTEM
+// RUN AWAY (EDIT ORIGINAL MESSAGE)
+// --------------------
+async function runAway(channel) {
+    if (!currentPokemon) return;
+
+    const embed = new EmbedBuilder()
+        .setTitle(`💨 ${currentPokemon.name.toUpperCase()} ran away!`)
+        .setColor(0x95a5a6)
+        .setImage(currentMessage?.embeds?.[0]?.image?.url);
+
+    if (currentMessage) {
+        await currentMessage.edit({ embeds: [embed] });
+    }
+
+    currentPokemon = null;
+    wrongGuesses = 0;
+}
+
+// --------------------
+// CATCH SYSTEM (3 GUESSES PER USER)
 // --------------------
 client.on("messageCreate", async (m) => {
     if (m.author.bot) return;
@@ -227,32 +210,55 @@ client.on("messageCreate", async (m) => {
     const guess = m.content.split(" ")[1]?.toLowerCase();
     if (!guess) return;
 
-    if (guess === currentPokemon.name) {
-        clearTimeout(despawnTimer);
+    const userId = m.author.id;
 
-        const embed = new EmbedBuilder()
-            .setTitle(`🎉 ${currentPokemon.name.toUpperCase()} has been caught!`)
-            .setDescription(
-                `🏆 | Caught by: ${m.author}\n` +
-                `📊 Rarity: ${currentPokemon.rarity.name}\n` +
-                (currentPokemon.shiny ? "✨ Shiny!!\n" : "")
-            )
-            .setColor(currentPokemon.rarity.color);
+    if (!userGuesses[userId]) userGuesses[userId] = 0;
 
-        await m.channel.send({ embeds: [embed] });
+    // ❌ limit per user
+    if (userGuesses[userId] >= 3) {
+        return m.reply("❌ You’ve used all 3 guesses for this Pokémon!");
+    }
 
-        currentPokemon = null;
-    } else {
+    userGuesses[userId]++;
+
+    // ❌ wrong guess
+    if (guess !== currentPokemon.name) {
+        m.react("❌");
+
         wrongGuesses++;
 
         if (wrongGuesses >= 10) {
             clearTimeout(despawnTimer);
-
-            m.channel.send(`💨 ${currentPokemon.name.toUpperCase()} ran away!`);
-
-            currentPokemon = null;
+            runAway(m.channel);
         }
+
+        return;
     }
+
+    // 🏆 correct catch
+    clearTimeout(despawnTimer);
+
+    const embed = new EmbedBuilder()
+        .setTitle(`🎉 ${currentPokemon.name.toUpperCase()} has been caught!`)
+        .setDescription(
+            `🏆 | Caught by: ${m.author}\n` +
+            `📊 Rarity: ${currentPokemon.rarity.name}\n` +
+            (currentPokemon.shiny ? "✨ Shiny!!\n" : "")
+        )
+        .setColor(currentPokemon.rarity.color)
+        .setImage(currentMessage?.embeds?.[0]?.image?.url);
+
+    // ✏️ EDIT ORIGINAL SPAWN MESSAGE
+    if (currentMessage) {
+        await currentMessage.edit({ embeds: [embed] });
+    }
+
+    // 📢 NEW MESSAGE
+    await m.channel.send(
+        `🎉 **${currentPokemon.name.toUpperCase()}** has been caught!`
+    );
+
+    currentPokemon = null;
 });
 
 // --------------------
