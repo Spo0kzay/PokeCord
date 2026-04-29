@@ -20,19 +20,21 @@ const client = new Client({
     ]
 });
 
-// store per-server spawn channel
+// per-server spawn channels
 const spawnChannels = {};
 
-// active Pokémon
+// active encounter
 let currentPokemon = null;
+let wrongGuesses = 0;
+let despawnTimer = null;
 
 // --------------------
-// SLASH COMMAND SETUP
+// REGISTER SLASH COMMAND
 // --------------------
 const commands = [
     new SlashCommandBuilder()
         .setName('setup')
-        .setDescription('Set the Pokémon spawn channel')
+        .setDescription('Set Pokémon spawn channel')
         .addChannelOption(option =>
             option.setName('channel')
                 .setDescription('Spawn channel')
@@ -58,7 +60,7 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 })();
 
 // --------------------
-// HANDLE /setup
+// /setup handler
 // --------------------
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
@@ -76,10 +78,10 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // --------------------
-// RANDOM SPAWN (ALL POKEMON)
+// SPAWN FUNCTION
 // --------------------
 async function spawnPokemon(channel) {
-    if (currentPokemon) return; // prevent overlap
+    if (currentPokemon) return;
 
     try {
         const randomId = Math.floor(Math.random() * 1025) + 1;
@@ -96,16 +98,29 @@ async function spawnPokemon(channel) {
         if (!image) return spawnPokemon(channel);
 
         currentPokemon = { name };
+        wrongGuesses = 0;
 
         const embed = new EmbedBuilder()
             .setTitle("🌿 A wild Pokémon appeared!")
-            .setDescription("Type `!catch <name>` to catch it!")
+            .setDescription(
+                "Type `!catch <name>` to catch it!\n\n" +
+                `🧪 Debug: **${name.toUpperCase()}**`
+            )
             .setImage(image)
             .setColor(0x00ff99);
 
         await channel.send({ embeds: [embed] });
 
         console.log(`Spawned: ${name}`);
+
+        // 10 min despawn
+        despawnTimer = setTimeout(() => {
+            if (currentPokemon) {
+                channel.send(`💨 The wild **${currentPokemon.name.toUpperCase()}** ran away...`);
+                currentPokemon = null;
+                wrongGuesses = 0;
+            }
+        }, 10 * 60 * 1000);
 
     } catch (err) {
         console.error("Spawn error:", err);
@@ -130,15 +145,32 @@ client.on("messageCreate", async (message) => {
     }
 
     if (guess === currentPokemon.name) {
+        clearTimeout(despawnTimer);
+
         await message.reply(`🎉 ${message.author} caught **${currentPokemon.name.toUpperCase()}**!`);
+
         currentPokemon = null;
+        wrongGuesses = 0;
+
     } else {
+        wrongGuesses++;
         message.react("❌");
+
+        if (wrongGuesses >= 10) {
+            clearTimeout(despawnTimer);
+
+            message.channel.send(
+                `💨 The wild **${currentPokemon.name.toUpperCase()}** ran away due to too many failed attempts...`
+            );
+
+            currentPokemon = null;
+            wrongGuesses = 0;
+        }
     }
 });
 
 // --------------------
-// LOOP (30s SPAWNS)
+// LOOP
 // --------------------
 client.once("ready", () => {
     console.log(`Logged in as ${client.user.tag}`);
