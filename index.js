@@ -26,7 +26,6 @@ const client = new Client({
 const spawnChannels = {};
 const shinyRole = {};
 const mythicRole = {};
-const eventConfig = {};
 
 let currentPokemon = null;
 let currentMessage = null;
@@ -58,31 +57,42 @@ function isShiny() {
 }
 
 // --------------------
-// SLASH COMMANDS
+// SLASH COMMANDS (FIXED - NO UNDEFINED ERRORS)
 // --------------------
 const commands = [
     new SlashCommandBuilder()
         .setName('setup')
-        .setDescription('Set spawn channel')
-        .addChannelOption(o =>
-            o.setName('channel').setRequired(true)
+        .setDescription('Set the Pokémon spawn channel')
+        .addChannelOption(option =>
+            option
+                .setName('channel')
+                .setDescription('Channel for Pokémon spawns')
+                .setRequired(true)
         ),
 
     new SlashCommandBuilder()
         .setName('setuprole')
-        .setDescription('Set special roles')
-        .addRoleOption(o =>
-            o.setName('shinyhunter')
+        .setDescription('Set special roles for rewards')
+        .addRoleOption(option =>
+            option
+                .setName('shinyhunter')
+                .setDescription('Role rewarded for shiny hunters')
+                .setRequired(false)
         )
-        .addRoleOption(o =>
-            o.setName('mythichunter')
+        .addRoleOption(option =>
+            option
+                .setName('mythichunter')
+                .setDescription('Role rewarded for mythic hunters')
+                .setRequired(false)
         ),
 
     new SlashCommandBuilder()
         .setName('eventinfo')
-        .setDescription('View event timing info')
-        .addStringOption(o =>
-            o.setName('type')
+        .setDescription('View event info')
+        .addStringOption(option =>
+            option
+                .setName('type')
+                .setDescription('Event type')
                 .setRequired(true)
                 .addChoices(
                     { name: 'legendary', value: 'legendary' },
@@ -91,13 +101,19 @@ const commands = [
         )
 ].map(c => c.toJSON());
 
+// register commands
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
-    await rest.put(
-        Routes.applicationCommands(CLIENT_ID),
-        { body: commands }
-    );
+    try {
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commands }
+        );
+        console.log("Slash commands registered.");
+    } catch (err) {
+        console.error(err);
+    }
 })();
 
 // --------------------
@@ -106,9 +122,11 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
 
-    // setup channel
+    // setup
     if (i.commandName === 'setup') {
-        spawnChannels[i.guildId] = i.options.getChannel('channel').id;
+        const channel = i.options.getChannel('channel');
+        spawnChannels[i.guildId] = channel.id;
+
         return i.reply({ content: "✅ Spawn channel set", ephemeral: true });
     }
 
@@ -120,7 +138,7 @@ client.on('interactionCreate', async (i) => {
         if (shiny) shinyRole[i.guildId] = shiny.id;
         if (mythic) mythicRole[i.guildId] = mythic.id;
 
-        return i.reply({ content: "✅ Roles set", ephemeral: true });
+        return i.reply({ content: "✅ Roles saved", ephemeral: true });
     }
 
     // event info
@@ -129,22 +147,20 @@ client.on('interactionCreate', async (i) => {
 
         const data = {
             legendary: {
-                cooldown: "12 hours",
-                description: "🔥 Legendary events spawn powerful Pokémon with boosted rarity rates."
+                time: "12 hours",
+                desc: "🔥 Legendary events spawn powerful Pokémon with boosted rarity."
             },
             mythic: {
-                cooldown: "48 hours",
-                description: "👑 Mythic events are extremely rare server-wide special spawns."
+                time: "48 hours",
+                desc: "👑 Mythic events are extremely rare server-wide spawns."
             }
         };
 
         const e = data[type];
 
         const embed = new EmbedBuilder()
-            .setTitle(`📅 ${type.toUpperCase()} EVENT INFO`)
-            .setDescription(
-                `⏰ Cooldown: **${e.cooldown}**\n\n${e.description}`
-            )
+            .setTitle(`📅 ${type.toUpperCase()} EVENT`)
+            .setDescription(`⏰ Cooldown: **${e.time}**\n\n${e.desc}`)
             .setColor(type === "mythic" ? 0xe74c3c : 0xe67e22);
 
         return i.reply({ embeds: [embed], ephemeral: true });
@@ -152,12 +168,13 @@ client.on('interactionCreate', async (i) => {
 });
 
 // --------------------
-// SPAWN
+// SPAWN SYSTEM
 // --------------------
 async function spawnPokemon(channel) {
     if (currentPokemon) return;
 
     const id = getWeightedPokemonId();
+
     const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
     const data = await res.json();
 
@@ -200,12 +217,11 @@ async function spawnPokemon(channel) {
 }
 
 // --------------------
-// CATCH
+// CATCH SYSTEM
 // --------------------
 client.on("messageCreate", async (m) => {
     if (m.author.bot) return;
     if (!m.content.startsWith("!catch")) return;
-
     if (!currentPokemon) return;
 
     const guess = m.content.split(" ")[1]?.toLowerCase();
